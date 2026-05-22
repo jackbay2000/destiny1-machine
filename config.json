@@ -1,0 +1,33 @@
+{
+  "sensitivity": {
+    "x": 25.0,
+    "y": 22.0,
+    "acceleration": 1.0,
+    "ads_multiplier": 0.4
+  },
+  "bindings": {
+    "w":           "ls_up",
+    "a":           "ls_left",
+    "s":           "ls_down",
+    "d":           "ls_right",
+    "space":       "cross",
+    "c":           "circle",
+    "shift":       "l3",
+    "r":           "square",
+    "t":           "triangle",
+    "q":           "r1",
+    "e":           "r3",
+    "g":           "l1",
+    "f":           "r2",
+    "left_click":  "r2",
+    "right_click": "l2",
+    "tab":         "touchpad",
+    "esc":         "options",
+    "1":           "dpad_up",
+    "2":           "dpad_down",
+    "3":           "dpad_left",
+    "4":           "dpad_right"
+  },
+  "capture_toggle": "f3",
+  "update_hz": 250
+}
