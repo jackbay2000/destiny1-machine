@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-destiny1-mk — Mouse & Keyboard to DualShock 4 bridge
-Works alongside chiaki-ng to let you play Destiny 1 on PC with full M&K.
+destiny1-mk — Mouse & Keyboard to Xbox 360 virtual controller bridge
+Works with PS4 Remote Play to let you play Destiny 1 on PC with full M&K.
+PS4 Remote Play maps Xbox buttons to PS4 buttons automatically.
 """
 
 import json
@@ -85,34 +86,30 @@ def load_config() -> dict:
     return DEFAULT_CONFIG.copy()
 
 
-# ── DS4 action tables ─────────────────────────────────────────────────────────
+# ── XInput action table ───────────────────────────────────────────────────────
+# PS4 Remote Play maps Xbox buttons → PS4 buttons automatically:
+#   A=Cross  B=Circle  X=Square  Y=Triangle
+#   LB=L1  RB=R1  LT=L2  RT=R2  LS=L3  RS=R3
+#   Start=Options  Back=Share
 
-BTN     = vg.DS4_BUTTONS
-SPECIAL = vg.DS4_SPECIAL_BUTTONS
-DPAD    = vg.DS4_DPAD_DIRECTIONS
+BTN = vg.XUSB_BUTTON
 
 ACTION_BTN = {
-    "cross":    BTN.DS4_BUTTON_CROSS,
-    "circle":   BTN.DS4_BUTTON_CIRCLE,
-    "square":   BTN.DS4_BUTTON_SQUARE,
-    "triangle": BTN.DS4_BUTTON_TRIANGLE,
-    "l1":       BTN.DS4_BUTTON_SHOULDER_LEFT,
-    "r1":       BTN.DS4_BUTTON_SHOULDER_RIGHT,
-    "l3":       BTN.DS4_BUTTON_THUMB_LEFT,
-    "r3":       BTN.DS4_BUTTON_THUMB_RIGHT,
-    "options":  BTN.DS4_BUTTON_OPTIONS,
-    "share":    BTN.DS4_BUTTON_SHARE,
-}
-
-DPAD_TABLE = {
-    (True,  False, False, False): DPAD.DS4_BUTTON_DPAD_NORTH,
-    (False, True,  False, False): DPAD.DS4_BUTTON_DPAD_SOUTH,
-    (False, False, True,  False): DPAD.DS4_BUTTON_DPAD_WEST,
-    (False, False, False, True):  DPAD.DS4_BUTTON_DPAD_EAST,
-    (True,  False, False, True):  DPAD.DS4_BUTTON_DPAD_NORTHEAST,
-    (True,  False, True,  False): DPAD.DS4_BUTTON_DPAD_NORTHWEST,
-    (False, True,  False, True):  DPAD.DS4_BUTTON_DPAD_SOUTHEAST,
-    (False, True,  True,  False): DPAD.DS4_BUTTON_DPAD_SOUTHWEST,
+    "cross":    BTN.XUSB_GAMEPAD_A,
+    "circle":   BTN.XUSB_GAMEPAD_B,
+    "square":   BTN.XUSB_GAMEPAD_X,
+    "triangle": BTN.XUSB_GAMEPAD_Y,
+    "l1":       BTN.XUSB_GAMEPAD_LEFT_SHOULDER,
+    "r1":       BTN.XUSB_GAMEPAD_RIGHT_SHOULDER,
+    "l3":       BTN.XUSB_GAMEPAD_LEFT_THUMB,
+    "r3":       BTN.XUSB_GAMEPAD_RIGHT_THUMB,
+    "options":  BTN.XUSB_GAMEPAD_START,
+    "share":    BTN.XUSB_GAMEPAD_BACK,
+    "touchpad": BTN.XUSB_GAMEPAD_BACK,
+    "dpad_up":    BTN.XUSB_GAMEPAD_DPAD_UP,
+    "dpad_down":  BTN.XUSB_GAMEPAD_DPAD_DOWN,
+    "dpad_left":  BTN.XUSB_GAMEPAD_DPAD_LEFT,
+    "dpad_right": BTN.XUSB_GAMEPAD_DPAD_RIGHT,
 }
 
 # ── Bridge ────────────────────────────────────────────────────────────────────
@@ -130,7 +127,7 @@ class InputBridge:
         self.ads_mult = sx["ads_multiplier"]
         self.dt       = 1.0 / cfg["update_hz"]
 
-        self.pad      = vg.VDS4Gamepad()
+        self.pad      = vg.VX360Gamepad()
         self.captured = False
         self.running  = False
 
@@ -228,14 +225,11 @@ class InputBridge:
         try:
             if action in ACTION_BTN:
                 self.pad.press_button(ACTION_BTN[action])
-            elif action == "touchpad":
-                self.pad.press_special_button(SPECIAL.DS4_SPECIAL_BUTTON_TOUCHPAD)
             elif action == "l2":
                 self.pad.left_trigger(value=255)
             elif action == "r2":
                 self.pad.right_trigger(value=255)
-            elif action.startswith("dpad_"):
-                self._send_dpad()
+            else:
                 return
             self.pad.update()
         except Exception:
@@ -245,27 +239,12 @@ class InputBridge:
         try:
             if action in ACTION_BTN:
                 self.pad.release_button(ACTION_BTN[action])
-            elif action == "touchpad":
-                self.pad.release_special_button(SPECIAL.DS4_SPECIAL_BUTTON_TOUCHPAD)
             elif action == "l2":
                 self.pad.left_trigger(value=0)
             elif action == "r2":
                 self.pad.right_trigger(value=0)
-            elif action.startswith("dpad_"):
-                self._send_dpad()
+            else:
                 return
-            self.pad.update()
-        except Exception:
-            pass
-
-    def _send_dpad(self):
-        with self._lock:
-            ac = self._action_count
-            key = (ac["dpad_up"] > 0, ac["dpad_down"] > 0,
-                   ac["dpad_left"] > 0, ac["dpad_right"] > 0)
-        direction = DPAD_TABLE.get(key, DPAD.DS4_BUTTON_DPAD_NONE)
-        try:
-            self.pad.directional_pad(direction=direction)
             self.pad.update()
         except Exception:
             pass
@@ -324,7 +303,7 @@ class InputBridge:
     def start(self):
         self.running = True
         print("=" * 50)
-        print("  destiny1-mk  |  M&K → DS4 bridge")
+        print("  destiny1-mk  |  M&K → Xbox virtual controller")
         print("=" * 50)
         print(f"  Capture toggle : {self.capture_toggle.upper()}")
         print(f"  Sensitivity    : x={self.sens_x}  y={self.sens_y}")
