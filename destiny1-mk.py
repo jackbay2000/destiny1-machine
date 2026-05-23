@@ -34,10 +34,13 @@ if missing:
 
 CONFIG_FILE = Path(__file__).parent / "config.json"
 
+_SENS_BASE_X = 25.0  # pixels per full deflection at sensitivity 1.0
+_SENS_BASE_Y = 22.0
+
 DEFAULT_CONFIG = {
     "sensitivity": {
-        "x": 25.0,
-        "y": 22.0,
+        "x": 1.0,
+        "y": 1.0,
         "acceleration": 1.0,
         "ads_multiplier": 0.4
     },
@@ -86,30 +89,30 @@ def load_config() -> dict:
     return DEFAULT_CONFIG.copy()
 
 
-# ── XInput action table ───────────────────────────────────────────────────────
-# PS4 Remote Play maps Xbox buttons → PS4 buttons automatically:
-#   A=Cross  B=Circle  X=Square  Y=Triangle
-#   LB=L1  RB=R1  LT=L2  RT=R2  LS=L3  RS=R3
-#   Start=Options  Back=Share
+# ── DS4 action table ──────────────────────────────────────────────────────────
 
-BTN = vg.XUSB_BUTTON
+BTN      = vg.DS4_BUTTONS
+DPAD     = vg.DS4_DPAD_DIRECTIONS
+SPEC_BTN = vg.DS4_SPECIAL_BUTTONS
+
+class RECT(ctypes.Structure):
+    _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 ACTION_BTN = {
-    "cross":    BTN.XUSB_GAMEPAD_A,
-    "circle":   BTN.XUSB_GAMEPAD_B,
-    "square":   BTN.XUSB_GAMEPAD_X,
-    "triangle": BTN.XUSB_GAMEPAD_Y,
-    "l1":       BTN.XUSB_GAMEPAD_LEFT_SHOULDER,
-    "r1":       BTN.XUSB_GAMEPAD_RIGHT_SHOULDER,
-    "l3":       BTN.XUSB_GAMEPAD_LEFT_THUMB,
-    "r3":       BTN.XUSB_GAMEPAD_RIGHT_THUMB,
-    "options":  BTN.XUSB_GAMEPAD_START,
-    "share":    BTN.XUSB_GAMEPAD_BACK,
-    "touchpad": BTN.XUSB_GAMEPAD_BACK,
-    "dpad_up":    BTN.XUSB_GAMEPAD_DPAD_UP,
-    "dpad_down":  BTN.XUSB_GAMEPAD_DPAD_DOWN,
-    "dpad_left":  BTN.XUSB_GAMEPAD_DPAD_LEFT,
-    "dpad_right": BTN.XUSB_GAMEPAD_DPAD_RIGHT,
+    "cross":    BTN.DS4_BUTTON_CROSS,
+    "circle":   BTN.DS4_BUTTON_CIRCLE,
+    "square":   BTN.DS4_BUTTON_SQUARE,
+    "triangle": BTN.DS4_BUTTON_TRIANGLE,
+    "l1":       BTN.DS4_BUTTON_SHOULDER_LEFT,
+    "r1":       BTN.DS4_BUTTON_SHOULDER_RIGHT,
+    "l3":       BTN.DS4_BUTTON_THUMB_LEFT,
+    "r3":       BTN.DS4_BUTTON_THUMB_RIGHT,
+    "options":  BTN.DS4_BUTTON_OPTIONS,
+    "share":    BTN.DS4_BUTTON_SHARE,
 }
 
 # ── Bridge ────────────────────────────────────────────────────────────────────
@@ -121,21 +124,20 @@ class InputBridge:
         self.capture_toggle = cfg["capture_toggle"]
 
         sx = cfg["sensitivity"]
-        self.sens_x   = sx["x"]
-        self.sens_y   = sx["y"]
+        self.sens_x   = _SENS_BASE_X / max(sx["x"], 0.001)
+        self.sens_y   = _SENS_BASE_Y / max(sx["y"], 0.001)
         self.accel    = sx["acceleration"]
         self.ads_mult = sx["ads_multiplier"]
         self.dt       = 1.0 / cfg["update_hz"]
 
-        self.pad      = vg.VX360Gamepad()
+        self.pad      = vg.VDS4Gamepad()
         self.captured = False
         self.running  = False
+        self._chiaki_focused = False
 
         self._lock         = threading.Lock()
-        self._mouse_dx     = 0.0
-        self._mouse_dy     = 0.0
-        self._resetting    = False
         self._action_count: dict[str, int] = defaultdict(int)
+        self._held_keys:    set[str]        = set()
 
         u32        = ctypes.windll.user32
         self._cx   = u32.GetSystemMetrics(0) // 2
@@ -164,35 +166,34 @@ class InputBridge:
         if btn == pm.Button.left:   return "left_click"
         if btn == pm.Button.right:  return "right_click"
         if btn == pm.Button.middle: return "middle_click"
+        if btn == pm.Button.x1:    return "mouse4"
+        if btn == pm.Button.x2:    return "mouse5"
         return ""
 
     # ── pynput callbacks ──────────────────────────────────────────────────
 
     def _on_key_press(self, key):
         name = self._norm_key(key)
+        with self._lock:
+            if name in self._held_keys:
+                return  # suppress Windows key-repeat
+            self._held_keys.add(name)
         if name == self.capture_toggle:
             self._toggle_capture()
+            return
+        if not self._chiaki_focused:
             return
         self._input_down(name)
 
     def _on_key_release(self, key):
-        self._input_up(self._norm_key(key))
-
-    def _on_mouse_move(self, x, y):
-        if self._resetting:
-            self._resetting = False
-            return
-        if not self.captured:
-            return
-        dx, dy = x - self._cx, y - self._cy
-        if dx or dy:
-            with self._lock:
-                self._mouse_dx += dx
-                self._mouse_dy += dy
-            self._resetting = True
-            ctypes.windll.user32.SetCursorPos(self._cx, self._cy)
+        name = self._norm_key(key)
+        with self._lock:
+            self._held_keys.discard(name)
+        self._input_up(name)
 
     def _on_mouse_click(self, x, y, btn, pressed):
+        if not self._chiaki_focused:
+            return
         name = self._norm_mouse_btn(btn)
         if pressed:
             self._input_down(name)
@@ -202,29 +203,35 @@ class InputBridge:
     # ── Action dispatch ───────────────────────────────────────────────────
 
     def _input_down(self, key_name: str):
-        action = self.bindings.get(key_name)
-        if not action:
+        binding = self.bindings.get(key_name)
+        if not binding:
             return
-        with self._lock:
-            self._action_count[action] += 1
-            first = self._action_count[action] == 1
-        if first:
-            self._press(action)
+        actions = binding if isinstance(binding, list) else [binding]
+        for action in actions:
+            with self._lock:
+                self._action_count[action] += 1
+                first = self._action_count[action] == 1
+            if first:
+                self._press(action)
 
     def _input_up(self, key_name: str):
-        action = self.bindings.get(key_name)
-        if not action:
+        binding = self.bindings.get(key_name)
+        if not binding:
             return
-        with self._lock:
-            self._action_count[action] = max(0, self._action_count[action] - 1)
-            last = self._action_count[action] == 0
-        if last:
-            self._release(action)
+        actions = binding if isinstance(binding, list) else [binding]
+        for action in actions:
+            with self._lock:
+                self._action_count[action] = max(0, self._action_count[action] - 1)
+                last = self._action_count[action] == 0
+            if last:
+                self._release(action)
 
     def _press(self, action: str):
         try:
             if action in ACTION_BTN:
                 self.pad.press_button(ACTION_BTN[action])
+            elif action == "touchpad":
+                self.pad.press_special_button(SPEC_BTN.DS4_SPECIAL_BUTTON_TOUCHPAD)
             elif action == "l2":
                 self.pad.left_trigger(value=255)
             elif action == "r2":
@@ -239,6 +246,8 @@ class InputBridge:
         try:
             if action in ACTION_BTN:
                 self.pad.release_button(ACTION_BTN[action])
+            elif action == "touchpad":
+                self.pad.release_special_button(SPEC_BTN.DS4_SPECIAL_BUTTON_TOUCHPAD)
             elif action == "l2":
                 self.pad.left_trigger(value=0)
             elif action == "r2":
@@ -252,31 +261,55 @@ class InputBridge:
     # ── Analog update loop ────────────────────────────────────────────────
 
     def _update(self):
+        focused = self._is_chiaki_focused()
+        if not focused and self._chiaki_focused:
+            self._on_focus_lost()
+        self._chiaki_focused = focused
+
         with self._lock:
-            dx, dy = self._mouse_dx, self._mouse_dy
-            self._mouse_dx = self._mouse_dy = 0.0
             ac = dict(self._action_count)
 
         # Left stick (WASD)
-        lx = float(ac.get("ls_right", 0) > 0) - float(ac.get("ls_left", 0) > 0)
-        ly = float(ac.get("ls_down",  0) > 0) - float(ac.get("ls_up",   0) > 0)
+        lx = float(ac.get("ls_right", 0) > 0) - float(ac.get("ls_left",  0) > 0)
+        ly = float(ac.get("ls_up",    0) > 0) - float(ac.get("ls_down",  0) > 0)
         mag = math.sqrt(lx * lx + ly * ly)
         if mag > 1.0:
             lx /= mag
             ly /= mag
 
-        # Right stick (mouse)
+        # Right stick — poll cursor position, reset to center each tick
         if self.captured:
-            ads   = ac.get("l2", 0) > 0
-            mult  = self.ads_mult if ads else 1.0
-            rx    = self._curve(dx, self.sens_x * mult)
-            ry    = self._curve(dy, self.sens_y * mult)
+            pt = POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            dx = float(pt.x - self._cx)
+            dy = float(pt.y - self._cy)
+            ctypes.windll.user32.SetCursorPos(self._cx, self._cy)
+            ads  = ac.get("l2", 0) > 0
+            mult = self.ads_mult if ads else 1.0
+            rx   = self._curve(dx, self.sens_x * mult)
+            ry   = self._curve(dy, self.sens_y * mult)
         else:
             rx = ry = 0.0
+
+        # D-pad
+        up    = ac.get("dpad_up",    0) > 0
+        down  = ac.get("dpad_down",  0) > 0
+        left  = ac.get("dpad_left",  0) > 0
+        right = ac.get("dpad_right", 0) > 0
+        if   up and right: dpad = DPAD.DS4_BUTTON_DPAD_NORTHEAST
+        elif down and right: dpad = DPAD.DS4_BUTTON_DPAD_SOUTHEAST
+        elif down and left:  dpad = DPAD.DS4_BUTTON_DPAD_SOUTHWEST
+        elif up and left:    dpad = DPAD.DS4_BUTTON_DPAD_NORTHWEST
+        elif up:             dpad = DPAD.DS4_BUTTON_DPAD_NORTH
+        elif right:          dpad = DPAD.DS4_BUTTON_DPAD_EAST
+        elif down:           dpad = DPAD.DS4_BUTTON_DPAD_SOUTH
+        elif left:           dpad = DPAD.DS4_BUTTON_DPAD_WEST
+        else:                dpad = DPAD.DS4_BUTTON_DPAD_NONE
 
         try:
             self.pad.left_joystick_float(x_value_float=lx, y_value_float=ly)
             self.pad.right_joystick_float(x_value_float=rx, y_value_float=ry)
+            self.pad.directional_pad(direction=dpad)
             self.pad.update()
         except Exception:
             pass
@@ -287,12 +320,40 @@ class InputBridge:
         sign = 1.0 if val >= 0.0 else -1.0
         return max(-1.0, min(1.0, sign * (abs(val) ** (1.0 / max(self.accel, 0.1)))))
 
+    # ── Focus awareness ───────────────────────────────────────────────────
+
+    def _is_chiaki_focused(self) -> bool:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buf, 256)
+        return "chiaki" in buf.value.lower()
+
+    def _release_all(self):
+        with self._lock:
+            held = {a for a, c in self._action_count.items() if c > 0}
+            self._action_count.clear()
+            self._held_keys.clear()
+        for action in held:
+            self._release(action)
+
+    def _on_focus_lost(self):
+        if self.captured:
+            self.captured = False
+            ctypes.windll.user32.ShowCursor(True)
+            print(f"[-] Mouse released (chiaki lost focus) — {self.capture_toggle.upper()} to capture")
+        self._release_all()
+
     # ── Capture toggle ────────────────────────────────────────────────────
 
     def _toggle_capture(self):
         self.captured = not self.captured
         ctypes.windll.user32.ShowCursor(not self.captured)
         if self.captured:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            rect = RECT()
+            ctypes.windll.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            self._cx = (rect.left + rect.right) // 2
+            self._cy = (rect.top + rect.bottom) // 2
             ctypes.windll.user32.SetCursorPos(self._cx, self._cy)
             print(f"[+] Mouse captured   — {self.capture_toggle.upper()} to release")
         else:
@@ -306,7 +367,8 @@ class InputBridge:
         print("  destiny1-mk  |  M&K → Xbox virtual controller")
         print("=" * 50)
         print(f"  Capture toggle : {self.capture_toggle.upper()}")
-        print(f"  Sensitivity    : x={self.sens_x}  y={self.sens_y}")
+        sx = self.cfg["sensitivity"]
+        print(f"  Sensitivity    : x={sx['x']}  y={sx['y']}")
         print(f"  Update rate    : {self.cfg['update_hz']} Hz")
         print("  Edit config.json to change bindings/sensitivity")
         print("=" * 50)
@@ -315,7 +377,7 @@ class InputBridge:
         print("Ctrl+C to quit.\n")
 
         kb = pk.Listener(on_press=self._on_key_press, on_release=self._on_key_release)
-        ms = pm.Listener(on_move=self._on_mouse_move, on_click=self._on_mouse_click)
+        ms = pm.Listener(on_click=self._on_mouse_click)
         kb.start()
         ms.start()
 
