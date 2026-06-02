@@ -16,14 +16,14 @@ Bungie Servers
 destiny1-mk-capture.py
 (your mouse + keyboard)
       ↑
-chiaki-ng (minimized — controller forwarding only, no video)
+chiaki-ng (hidden on virtual desktop — controller forwarding only, no video)
 ```
 
 ### Why chiaki-ng is still needed
 
 Your PC cannot directly plug into the PS4 over USB as a controller — standard PCs only operate as USB hosts (they read devices, they don't act as one). chiaki-ng connects to your PS4 over your local network using Sony's Remote Play protocol and forwards the virtual controller inputs. It's the bridge that makes the PS4 see your keyboard and mouse as a real controller.
 
-**The key difference from the normal mode:** chiaki-ng runs minimized in the background. You never watch its video window. Instead, your PS4's HDMI output goes into your capture card, and OBS displays it on screen — giving you lower latency video, no compression artifacts, and direct access to the full HDMI signal.
+**The key difference from the normal mode:** chiaki-ng runs hidden in the background — moved to a separate virtual desktop so it stays fully active without being visible. You never watch its video window. Instead, your PS4's HDMI output goes into your capture card, and OBS displays it on screen — giving you lower latency video, no compression artifacts, and direct access to the full HDMI signal.
 
 ### What the capture card replaces
 
@@ -93,6 +93,11 @@ In chiaki-ng: **Settings → Controllers → check "Background Controller Events
 
 This lets chiaki-ng forward controller input even when its window is minimized.
 
+#### Set window type to Normal (required to minimize)
+In chiaki-ng: **Settings → Video → Window Type → Normal**
+
+Fullscreen mode takes over the whole screen and has no minimize button. Normal (windowed) mode gives you a regular window you can minimize to the taskbar.
+
 #### Stream settings (optional — since you won't be watching it)
 You can set the stream to the lowest resolution and bitrate (e.g. 360p, 1 Mbps) since you're not using the video. This reduces CPU/network overhead while keeping the controller connection alive.
 
@@ -119,8 +124,14 @@ This gives you a zero-latency fullscreen view of the PS4 while keeping all OBS f
 1. Turn on your PS4 and start Destiny 1
 2. Connect your PS4's HDMI to the capture card (and capture card to your PC via USB/PCIe)
 3. Open OBS — confirm you can see the PS4's output in the preview
+   - **To hear audio through your headphones via OBS (one-time setup):** OBS Settings → Audio → set **Monitoring Device** to your headphones. Then in the Audio Mixer, click the gear icon next to your PS4 capture source → **Advanced Audio Properties** → set **Audio Monitoring** to **Monitor and Output**. OBS remembers this.
 4. Open chiaki-ng and double-click your PS4 to start the Remote Play stream
-5. **Minimize chiaki-ng** — you don't need to see its window
+5. **Move chiaki-ng to a virtual desktop** — do not minimize it. Minimizing pauses the controller forwarding and your inputs will stop reaching the PS4. Instead:
+   - Press **Win + Tab** to open Task View
+   - Click **New Desktop** in the top-left
+   - Drag the chiaki-ng window onto the new desktop thumbnail
+   - Click your main desktop to switch back — chiaki-ng stays fully active but out of sight
+   - **Mute chiaki-ng's audio (one-time setup):** Right-click the speaker icon in the taskbar → Open Volume Mixer → set chiaki-ng to mute or 0. This prevents duplicate audio — your game audio will play through OBS instead. Windows remembers this per app.
 6. Double-click **run.bat** in this folder — wait for the terminal message
 7. Press **F3** to capture the mouse — cursor disappears and your inputs go to the PS4
 8. Play normally — watch the game in OBS
@@ -216,7 +227,7 @@ Starting points by DPI:
 - Try manually entering your PS4's IP: chiaki-ng → Add Console
 
 **Mouse moves but nothing happens in-game**
-- chiaki-ng must be connected and the stream must be active (even minimized)
+- chiaki-ng must be connected and the stream must be active — and it must **not be minimized** (minimizing pauses the stream). Move it to a virtual desktop instead (see step 5)
 - Check that "Background Controller Events" is on in chiaki-ng
 
 **Inputs continue after alt-tabbing**
