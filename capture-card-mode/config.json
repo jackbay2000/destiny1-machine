@@ -30,5 +30,7 @@
     "5":           "dpad_right"
   },
   "capture_toggle": "f3",
-  "update_hz": 250
+  "update_hz": 250,
+  "frame_gen": true,
+  "frame_gen_device": 0
 }

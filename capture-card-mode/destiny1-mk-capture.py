@@ -9,6 +9,7 @@ Mouse button events are consumed (not passed to other apps) while captured.
 
 import json
 import math
+import queue
 import sys
 import threading
 import time
@@ -32,6 +33,13 @@ except ImportError:
 if missing:
     print(f"[ERROR] Missing packages. Run:  pip install {' '.join(missing)}")
     sys.exit(1)
+
+try:
+    import cv2
+    import numpy as np
+    _HAVE_CV2 = True
+except ImportError:
+    _HAVE_CV2 = False
 
 # ── Mouse hook constants ──────────────────────────────────────────────────────
 
@@ -99,7 +107,9 @@ DEFAULT_CONFIG = {
         "4":           "dpad_right"
     },
     "capture_toggle": "f3",
-    "update_hz": 250
+    "update_hz": 250,
+    "frame_gen": False,
+    "frame_gen_device": 0
 }
 
 
@@ -110,8 +120,10 @@ def load_config() -> dict:
         cfg = {
             "sensitivity": {**DEFAULT_CONFIG["sensitivity"], **user.get("sensitivity", {})},
             "bindings":    {**DEFAULT_CONFIG["bindings"],    **user.get("bindings", {})},
-            "capture_toggle": user.get("capture_toggle", DEFAULT_CONFIG["capture_toggle"]),
-            "update_hz":      user.get("update_hz",      DEFAULT_CONFIG["update_hz"]),
+            "capture_toggle":  user.get("capture_toggle",  DEFAULT_CONFIG["capture_toggle"]),
+            "update_hz":       user.get("update_hz",       DEFAULT_CONFIG["update_hz"]),
+            "frame_gen":       user.get("frame_gen",       DEFAULT_CONFIG["frame_gen"]),
+            "frame_gen_device": user.get("frame_gen_device", DEFAULT_CONFIG["frame_gen_device"]),
         }
         return cfg
     with open(CONFIG_FILE, "w") as f:
@@ -164,6 +176,8 @@ class InputBridge:
         self.pad      = vg.VDS4Gamepad()
         self.captured = False
         self.running  = False
+        self._frame_gen        = cfg.get("frame_gen", False)
+        self._frame_gen_device = cfg.get("frame_gen_device", 0)
 
         self._lock         = threading.Lock()
         self._action_count: dict[str, int] = defaultdict(int)
@@ -402,16 +416,36 @@ class InputBridge:
         except Exception:
             pass
 
+    def _run_update_loop(self):
+        while self.running:
+            t0    = time.monotonic()
+            self._update()
+            sleep = self.dt - (time.monotonic() - t0)
+            if sleep > 0:
+                time.sleep(sleep)
+
     def _curve(self, delta: float, sensitivity: float) -> float:
         val  = delta / max(sensitivity, 0.001)
         sign = 1.0 if val >= 0.0 else -1.0
         return max(-1.0, min(1.0, sign * (abs(val) ** (1.0 / max(self.accel, 0.1)))))
 
+    # ── Cursor visibility ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _set_cursor_visible(visible: bool):
+        u32 = ctypes.windll.user32
+        if visible:
+            while u32.ShowCursor(True) < 0:
+                pass
+        else:
+            while u32.ShowCursor(False) >= 0:
+                pass
+
     # ── Capture toggle ────────────────────────────────────────────────────
 
     def _toggle_capture(self):
         self.captured = not self.captured
-        ctypes.windll.user32.ShowCursor(not self.captured)
+        self._set_cursor_visible(not self.captured)
         if self.captured:
             hwnd = ctypes.windll.user32.GetForegroundWindow()
             rect = RECT()
@@ -443,10 +477,20 @@ class InputBridge:
         sx = self.cfg["sensitivity"]
         print(f"  Sensitivity    : x={sx['x']}  y={sx['y']}")
         print(f"  Update rate    : {self.cfg['update_hz']} Hz")
+        if self._frame_gen:
+            if _HAVE_CV2:
+                print(f"  Frame gen      : ON  (device {self._frame_gen_device}, 30→60 fps)")
+            else:
+                print("  Frame gen      : OFF (requires: pip install opencv-python)")
+        else:
+            print("  Frame gen      : OFF")
         print("  Edit config.json to change bindings/sensitivity")
         print("=" * 55)
         print()
-        print("  VIDEO  : Watch your game in OBS (capture card feed)")
+        if self._frame_gen and _HAVE_CV2:
+            print("  VIDEO  : Capture card feed shown in the Frame Gen window")
+        else:
+            print("  VIDEO  : Watch your game in OBS (capture card feed)")
         print("  INPUT  : chiaki-ng must be running on a virtual desktop")
         print()
         print("  Press F3 anywhere to capture mouse and start playing.")
@@ -458,18 +502,150 @@ class InputBridge:
         kb.start()
         mouse_thread.start()
 
+        fg = None
+        if self._frame_gen and _HAVE_CV2:
+            threading.Thread(target=self._run_update_loop, daemon=True).start()
+            fg = FrameGenProcessor(self._frame_gen_device)
+            fg.start()
+
         try:
-            while self.running:
-                t0    = time.monotonic()
-                self._update()
-                sleep = self.dt - (time.monotonic() - t0)
-                if sleep > 0:
-                    time.sleep(sleep)
+            if fg is not None:
+                fg.run_display_loop(self)
+            else:
+                while self.running:
+                    t0    = time.monotonic()
+                    self._update()
+                    sleep = self.dt - (time.monotonic() - t0)
+                    if sleep > 0:
+                        time.sleep(sleep)
         finally:
             self.running = False
+            if fg is not None:
+                fg.stop()
             ctypes.windll.user32.ClipCursor(None)
-            ctypes.windll.user32.ShowCursor(True)
+            self._set_cursor_visible(True)
             kb.stop()
+
+
+# ── Frame Generation ──────────────────────────────────────────────────────────
+
+class FrameGenProcessor:
+    """
+    Captures video from a capture card device and uses optical flow to insert
+    one interpolated frame between each real frame, doubling 30 fps to 60 fps.
+
+    Pipeline:  _capture_loop → _raw_q → _interp_loop → _disp_q → run_display_loop
+    """
+
+    WINDOW = "destiny1 | Capture Card (60 fps)"
+
+    def __init__(self, device: int):
+        self._device  = device
+        self._raw_q   = queue.Queue(maxsize=2)
+        self._disp_q  = queue.Queue(maxsize=2)
+        self._running = False
+
+    def start(self):
+        self._running = True
+        threading.Thread(target=self._capture_loop, daemon=True).start()
+        threading.Thread(target=self._interp_loop,  daemon=True).start()
+
+    def stop(self):
+        self._running = False
+
+    # ── Capture thread ────────────────────────────────────────────────────
+
+    def _capture_loop(self):
+        cap = cv2.VideoCapture(self._device, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            print(f"[WARN] Frame gen: cannot open capture device {self._device}")
+            return
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        while self._running:
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.005)
+                continue
+            if self._raw_q.full():
+                try:
+                    self._raw_q.get_nowait()
+                except queue.Empty:
+                    pass
+            try:
+                self._raw_q.put_nowait(frame)
+            except queue.Full:
+                pass
+        cap.release()
+
+    # ── Interpolation thread ──────────────────────────────────────────────
+
+    def _interp_loop(self):
+        # Track the last *unique* frame so that duplicate frames emitted by the
+        # capture card (one real 30 fps frame sent twice to fill its 60 fps
+        # output) are ignored. Interpolation only runs between two genuinely
+        # different frames.
+        prev_unique = None
+        while self._running:
+            try:
+                curr = self._raw_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if prev_unique is not None and self._is_duplicate(prev_unique, curr):
+                continue
+            if prev_unique is not None:
+                interp = self._interpolate(prev_unique, curr)
+                if self._disp_q.full():
+                    try:
+                        self._disp_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                try:
+                    self._disp_q.put_nowait((interp, curr))
+                except queue.Full:
+                    pass
+            prev_unique = curr
+
+    def _is_duplicate(self, a: "np.ndarray", b: "np.ndarray") -> bool:
+        # Downsample to a tiny thumbnail for a fast per-pixel comparison.
+        # Capture card compression means true duplicates aren't bitwise identical,
+        # but their MAD will be well below 3; genuine new frames will be much higher.
+        small_a = cv2.resize(a, (64, 36))
+        small_b = cv2.resize(b, (64, 36))
+        return float(np.mean(np.abs(small_a.astype(np.int16) - small_b.astype(np.int16)))) < 3.0
+
+    def _interpolate(self, prev: "np.ndarray", curr: "np.ndarray") -> "np.ndarray":
+        h, w = prev.shape[:2]
+        # Compute optical flow at half resolution for real-time performance
+        hw, hh = w // 2, h // 2
+        g_p = cv2.cvtColor(cv2.resize(prev, (hw, hh)), cv2.COLOR_BGR2GRAY)
+        g_c = cv2.cvtColor(cv2.resize(curr, (hw, hh)), cv2.COLOR_BGR2GRAY)
+        flow = cv2.calcOpticalFlowFarneback(g_p, g_c, None, 0.5, 2, 12, 2, 5, 1.1, 0)
+        # Scale flow back to full resolution
+        flow = cv2.resize(flow, (w, h)) * 2.0
+        gy, gx = np.mgrid[0:h, 0:w].astype(np.float32)
+        half = flow * 0.5
+        # Bidirectional warp + blend for fewer artifacts
+        wf = cv2.remap(prev, gx + half[..., 0], gy + half[..., 1], cv2.INTER_LINEAR)
+        wb = cv2.remap(curr, gx - half[..., 0], gy - half[..., 1], cv2.INTER_LINEAR)
+        return cv2.addWeighted(wf, 0.5, wb, 0.5, 0)
+
+    # ── Display loop (main thread) ────────────────────────────────────────
+
+    def run_display_loop(self, bridge: "InputBridge"):
+        HALF = 1.0 / 60.0
+        cv2.namedWindow(self.WINDOW, cv2.WINDOW_NORMAL)
+        while bridge.running:
+            try:
+                interp, curr = self._disp_q.get(timeout=0.05)
+            except queue.Empty:
+                cv2.waitKey(1)
+                continue
+            cv2.imshow(self.WINDOW, interp)
+            cv2.waitKey(1)
+            time.sleep(max(0, HALF - 0.003))
+            cv2.imshow(self.WINDOW, curr)
+            cv2.waitKey(1)
+        cv2.destroyAllWindows()
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────

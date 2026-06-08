@@ -1,7 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(dir \"c:\\\\Users\\\\bayja\\\\OneDrive\\\\Desktop\\\\destiny1-machine\\\\capture-card-mode\")"
+      "Bash(dir \"c:\\\\Users\\\\bayja\\\\OneDrive\\\\Desktop\\\\destiny1-machine\\\\capture-card-mode\")",
+      "Bash(python test_frame_gen.py)",
+      "Bash(findstr -i \"opencv numpy\")"
     ]
   }
 }

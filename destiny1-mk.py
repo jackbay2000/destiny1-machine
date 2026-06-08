@@ -339,15 +339,27 @@ class InputBridge:
     def _on_focus_lost(self):
         if self.captured:
             self.captured = False
-            ctypes.windll.user32.ShowCursor(True)
+            self._set_cursor_visible(True)
             print(f"[-] Mouse released (chiaki lost focus) — {self.capture_toggle.upper()} to capture")
         self._release_all()
+
+    # ── Cursor visibility ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _set_cursor_visible(visible: bool):
+        u32 = ctypes.windll.user32
+        if visible:
+            while u32.ShowCursor(True) < 0:
+                pass
+        else:
+            while u32.ShowCursor(False) >= 0:
+                pass
 
     # ── Capture toggle ────────────────────────────────────────────────────
 
     def _toggle_capture(self):
         self.captured = not self.captured
-        ctypes.windll.user32.ShowCursor(not self.captured)
+        self._set_cursor_visible(not self.captured)
         if self.captured:
             hwnd = ctypes.windll.user32.GetForegroundWindow()
             rect = RECT()
@@ -390,7 +402,7 @@ class InputBridge:
                     time.sleep(sleep)
         finally:
             self.running = False
-            ctypes.windll.user32.ShowCursor(True)
+            self._set_cursor_visible(True)
             kb.stop()
             ms.stop()
 
